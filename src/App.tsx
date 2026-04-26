@@ -1,5 +1,7 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from "react"; import { supabase } from "./supabase"; 
-// ── CONSTANTS ────────────────────────────────────────────────────────────────── const C = { 
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { supabase } from "./supabase"; 
+// ── CONSTANTS ────────────────────────────────────────────────────────────────── 
+const C = { 
  navy:"#0B1F3A", navyL:"#122847", navyM:"#1a3560", navyD:"#081729", 
  gold:"#C9A84C", goldL:"#E2C06A", white:"#F5F5F0", 
  gray:"#8A9BAE", grayL:"#D4DCE6", green:"#2ecc71", orange:"#E8A020", red:"#C0392B", }; 
