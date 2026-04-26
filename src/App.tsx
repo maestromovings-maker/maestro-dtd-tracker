@@ -1,552 +1,929 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from "react";
-import { supabase } from "./supabase"; 
-// ── CONSTANTS ────────────────────────────────────────────────────────────────── 
-const C = { 
- navy:"#0B1F3A", navyL:"#122847", navyM:"#1a3560", navyD:"#081729", 
- gold:"#C9A84C", goldL:"#E2C06A", white:"#F5F5F0", 
- gray:"#8A9BAE", grayL:"#D4DCE6", green:"#2ecc71", orange:"#E8A020", red:"#C0392B", }; 
-const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string; 
-const REPS = [ 
- { id:"leti", name:"Leti", color:C.gold, avatar:"L" }, 
- { id:"habibi", name:"Habibi", color:"#5B9BD5", avatar:"H" }, 
- { id:"newhire", name:"New Hire", color:C.gray, avatar:"?" }, 
-]; 
-const STATUS: Record<string,{label:string,icon:string,color:string,bg:string}> = {  untouched: { label:"Not Knocked", icon:"○", color:"#3a4a5c", bg:C.navyD },  knocked_no_answer: { label:"No Answer", icon:"◌", color:C.gray, bg:C.navyD },  spoke_interested: { label:"Interested", icon:"★", color:C.gold, bg:"#2a2010" },  spoke_not_interested: { label:"Not Interested", icon:"✕", color:"#4a5a6a",bg:C.navyD },  follow_up: { label:"Follow-Up", icon:"⟳", color:C.orange, bg:"#2a1f00" },  booked: { label:"Booked!", icon:"✓", color:C.green, bg:"#0a2a15" }, }; 
-const VIEWS = { zones:"ZONES", route:"ROUTE", reps:"REPS", bulk:"BULK", map:"MAP" }; 
-const BULK_CITIES = [ 
- { city:"Dallas", zips:["75201","75202","75203","75204","75205","75206","75207","7520 freq:"monthly-address", color:"#3B82F6", 
- note:"Monthly, address-specific.", 
- url:"https://www.dallascityhall.com/departments/sanitation/Pages/Schedule.aspx",  window:"Week before your zone's pickup date", 
- tip:"Knock the week BEFORE their scheduled pickup. Homeowners are in purge mode." },  { city:"Garland", zips:["75040","75041","75042","75043","75044"],  freq:"weekly", color:"#8B5CF6", 
- note:"Weekly bulk pickup on same day as regular trash.", 
- url:"https://www.garlandtx.gov", 
- window:"Any week — bulk is weekly", 
- tip:"Every week is a good week. Bulk is weekly so residents always have motivation." },  { city:"Mesquite", zips:["75149","75150","75181","75182"], 
- freq:"weekly", color:"#10B981",
- note:"Weekly bulk pickup Mon-Fri depending on area.", 
- url:"https://www.cityofmesquite.com/3799/Collection-Schedule", 
- window:"Any week — bulk is weekly", 
- tip:"Weekly bulk pickup makes Mesquite a strong consistent target. Knock anytime." },  { city:"DeSoto", zips:["75115","75137"], 
- freq:"monthly-first-monday", color:"#C9A84C", 
- note:"New 2026 program — first Monday of each month.", 
- url:"https://www.ci.desoto.tx.us", 
- window:"3rd and 4th week of the month", 
- tip:"Best window is 3rd and 4th week — homeowners thinking ahead to next pickup." },  { city:"Duncanville", zips:["75116","75138"], 
- freq:"address-only", color:"#E8A020", 
- note:"Address-specific via Republic Services.", 
- url:"https://www.duncanvilletx.gov", 
- window:"Look up street before knocking", 
- tip:"Look up the street schedule before going out. Knock 5-7 days before pickup." },  { city:"Grand Prairie",zips:["75050","75051","75052","75054"], 
- freq:"by-request", color:"#EC4899", 
- note:"Residents must REQUEST free curbside pickup.", 
- url:"https://www.gptx.org/Departments/Solid-Waste/Garbage-Recycling-Collection/Bulky-Was window:"Anytime — residents must schedule their own", 
- tip:"Use this as your pitch: Skip the wait — we haul today." }, 
- { city:"Lancaster", zips:["75134","75146"], 
- freq:"address-only", color:"#6366F1", 
- note:"Check City of Lancaster for current schedule.", 
- url:"https://www.lancaster-tx.com", 
- window:"Verify before routing", 
- tip:"Older neighborhood stock means high haul potential. Verify then knock." },  { city:"Cedar Hill", zips:["75104","75106"], 
- freq:"address-only", color:"#14B8A6", 
- note:"Check Cedar Hill utility services for schedule.", 
- url:"https://www.cedarhilltx.com", 
- window:"Verify before routing", 
- tip:"Strong family neighborhoods with long-term residents. Great haul potential." }, ]; 
-const DESOTO_PICKUPS = ["Jan 5","Feb 2","Mar 2","Apr 6","May 4","Jun 1","Jul 6","Aug 3","Sep
-function getBulkStatus(city: any) { 
- const d = new Date().getDate(); 
- if (city.freq === "weekly") return { label:"Knock Anytime", color:C.green };  if (city.freq === "by-request") return { label:"Knock Anytime", color:C.green };  if (city.freq === "monthly-first-monday") { 
- if (d <= 7) return { label:"Pickup Week", color:C.red }; 
- if (d >= 15) return { label:"Knock Now!", color:C.green }; 
- return { label:"OK to Knock", color:C.gold }; 
- }
- return { label:"Verify First", color:C.gray }; 
-} 
-function getCityForZip(zip: string) { 
- return BULK_CITIES.find(c => c.zips.some(z => zip.startsWith(z))); 
-} 
-function zoneStats(doors: any[]) { 
- const knocked = doors.filter(x => x.status !== "untouched").length; 
- return { 
- total:doors.length, knocked, 
- booked: doors.filter(x => x.status === "booked").length, 
- followUp: doors.filter(x => x.status === "follow_up").length, 
- interested:doors.filter(x => x.status === "spoke_interested").length,  saturation:doors.length ? Math.round((knocked/doors.length)*100) : 0,  }; 
-} 
-function RepBadge({ repId, size=22 }: { repId:string, size?:number }) {  const rep = REPS.find(r => r.id === repId); 
- if (!rep) return null; 
- return <span style={{ display:"inline-flex", alignItems:"center", justifyContent:"center",  width:size, height:size, borderRadius:"50%", background:rep.color,  color:C.navy, fontSize:size*0.45, fontWeight:"bold", flexShrink:0 }}>{rep.avatar}</span>; } 
-function Chip({ active, col, onClick, children }: any) { 
- return <button onClick={onClick} style={{ padding:"6px 12px", borderRadius:20, border:"non fontSize:11, cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap" as any,  background:active?col:C.navyM, color:active?C.navy:C.gray, 
- fontWeight:active?"bold":"normal" }}>{children}</button>; 
-} 
-function Btn({ col, onClick, full, children, disabled }: any) { 
- return <button onClick={onClick} disabled={disabled} style={{ flex:full?1:undefined,  padding:"10px 18px", borderRadius:7, 
- border:col===C.gray?`1px solid ${C.navyM}`:"none", 
- background:col===C.gray?"transparent":(disabled?"#555":col), 
- color:col===C.gray?C.gray:C.navy, fontWeight:"bold", 
- cursor:disabled?"default":"pointer", fontFamily:"inherit", fontSize:12 }}>{children}</bu} 
-function Field({ label, children }: any) { 
- return <div style={{ marginBottom:14 }}> 
- <div style={{ fontSize:9, color:C.gray, letterSpacing:1, textTransform:"uppercase" as an {children} 
- </div>;
-} 
-function Input({ value, onChange, placeholder, type="text" }: any) { 
- return <input type={type} value={value} onChange={onChange} placeholder={placeholder}  style={{ width:"100%", background:C.navy, border:`1px solid ${C.navyM}`,  borderRadius:6, padding:"9px 12px", color:C.white, fontSize:13, 
- fontFamily:"inherit", boxSizing:"border-box" as any }} />; 
-} 
-function Modal({ title, subtitle, onClose, children }: any) { 
- return <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.8)", zIndex:200,  display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>  <div style={{ background:C.navyL, border:`1px solid ${C.gold}`, borderRadius:12,  padding:28, width:"100%", maxWidth:460, maxHeight:"92vh", overflowY:"auto" as any }}>  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", <div> 
- <div style={{ fontSize:11, color:C.gold, letterSpacing:2, textTransform:"uppercase {subtitle && <div style={{ fontSize:12, color:C.gray, marginTop:2 }}>{subtitle}</d </div> 
- <button onClick={onClose} style={{ background:"none", border:"none", color:C.gray, f </div> 
- {children} 
- </div> 
- </div>; 
-} 
-function RouteCard({ door, zoneName, zoneZip, isFollowUp, onClick }: any) {  const s = STATUS[door.status]; 
- return <div onClick={onClick} style={{ background:isFollowUp?"#1e1600":C.navyL,  border:`1px solid ${isFollowUp?C.orange:C.navyM}`, borderLeft:`4px solid ${s.color}`,  borderRadius:8, padding:"13px 16px", cursor:"pointer", marginBottom:6,  display:"flex", alignItems:"center", gap:12 }}> 
- <span style={{ fontSize:20 }}>{s.icon}</span> 
- <div style={{ flex:1, minWidth:0 }}> 
- <div style={{ fontSize:14, color:C.white }}>{door.address}</div>  <div style={{ fontSize:10, color:C.gray, marginTop:3 }}>{zoneName} · {zoneZip}{door.co {door.notes && <div style={{ fontSize:10, color:C.gray, fontStyle:"italic", marginTop: </div> 
- {isFollowUp && <span style={{ fontSize:10, color:C.orange, background:"#2a1f00", padding: </div>; 
-} 
-function DoorModal({ door, zoneName, onSave, onClose }: any) { 
- const [d, setD] = useState({ ...door }); 
- return <Modal title="Update Door" subtitle={zoneName} onClose={onClose}>  <Field label="Address"><Input value={d.address} onChange={(e:any)=>setD((p:any)=>({...p, <Field label="Status">
- <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>  {Object.entries(STATUS).map(([key,s])=>( 
- <button key={key} onClick={()=>setD((p:any)=>({...p,status:key}))}  style={{ padding:"9px 10px", borderRadius:6, 
- border:`1px solid ${d.status===key?s.color:C.navyM}`, 
- background:d.status===key?s.bg:"transparent", 
- color:d.status===key?s.color:C.gray, 
- cursor:"pointer", fontSize:12, fontFamily:"inherit", textAlign:"left" as any }} {s.icon} {s.label} 
- </button> 
- ))} 
- </div> 
- </Field> 
- <Field label="Contact Name / Phone"> 
- <Input value={d.contact} onChange={(e:any)=>setD((p:any)=>({...p,contact:e.target.valu </Field> 
- <Field label="Notes"> 
- <textarea value={d.notes} onChange={(e:any)=>setD((p:any)=>({...p,notes:e.target.value} placeholder="Quote given, callback day, items mentioned..." rows={3}  style={{ width:"100%", background:C.navy, border:`1px solid ${C.navyM}`,  borderRadius:6, padding:"9px 12px", color:C.white, fontSize:13,  fontFamily:"inherit", resize:"vertical", boxSizing:"border-box" as any }} />  </Field> 
- <div style={{ display:"flex", gap:8, marginTop:20 }}> 
- <Btn col={C.gold} onClick={()=>onSave(d)} full>Save</Btn> 
- <Btn col={C.gray} onClick={onClose} full>Cancel</Btn> 
- </div> 
- </Modal>; 
-} 
-function BulkCalendarView() { 
- const today = new Date(); 
- const monthName = today.toLocaleString("default",{month:"long"}); 
- const year = today.getFullYear(); 
- const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];  return <div> 
- <div style={{ marginBottom:20 }}> 
- <div style={{ fontSize:18, fontWeight:"bold", color:C.gold, marginBottom:4 }}>Bulk Pic <div style={{ fontSize:12, color:C.gray }}>{monthName} {year} · Knock smart — time you </div> 
- <div style={{ display:"flex", gap:8, marginBottom:20, flexWrap:"wrap" as any }}>  {[["Knock Now",C.green],["Anytime",C.gold],["Pickup Week",C.red],["Verify First",C.gra <div key={String(l)} style={{ display:"flex", alignItems:"center", gap:5, padding:"4 <div style={{ width:8, height:8, borderRadius:"50%", background:String(c) }} />  <span style={{ fontSize:10, color:C.grayL }}>{l}</span> 
- </div> 
- ))}
- </div> 
- <div style={{ background:"#1a2010", border:`1px solid ${C.green}`, borderRadius:10, padd <div style={{ fontSize:12, fontWeight:"bold", color:C.green, marginBottom:6 }}>DeSoto  <div style={{ fontSize:11, color:C.grayL, marginBottom:10 }}>Pickup week starts first  <div style={{ display:"flex", gap:6, flexWrap:"wrap" as any }}> 
- {DESOTO_PICKUPS.map((w,i)=>{ 
- const isCurrent = months[today.getMonth()]===w.split(" ")[0];  return <span key={i} style={{ padding:"3px 8px", borderRadius:6, fontSize:10,  background:isCurrent?C.green:C.navyM, color:isCurrent?C.navy:C.gray, fontWeight: })} 
- </div> 
- </div> 
- <div style={{ display:"flex", flexDirection:"column", gap:10 }}> 
- {BULK_CITIES.map(city=>{ 
- const bs = getBulkStatus(city); 
- return <div key={city.city} style={{ background:C.navyL, border:`1px solid ${C.navyM} borderLeft:`4px solid ${city.color}`, borderRadius:10, padding:"14px 18px" }}>  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", <div style={{ display:"flex", alignItems:"center", gap:8 }}>  <div style={{ width:10, height:10, borderRadius:"50%", background:city.color }} <span style={{ fontSize:14, fontWeight:"bold", color:C.white }}>{city.city}</s <span style={{ fontSize:10, color:C.gray }}>ZIP {city.zips.slice(0,3).join(",  </div> 
- <span style={{ fontSize:10, fontWeight:"bold", color:bs.color,  background:`${bs.color}22`, padding:"3px 10px", borderRadius:10 }}>{bs.label}< </div> 
- <div style={{ fontSize:11, color:C.grayL, marginBottom:4 }}>{city.note}</div>  <div style={{ fontSize:11, color:C.gold, marginBottom:8 }}> {city.tip}</div>  <div style={{ display:"flex", gap:12, alignItems:"center", flexWrap:"wrap" as any } <span style={{ fontSize:10, color:C.gray }}> {city.window}</span>  <a href={city.url} target="_blank" rel="noreferrer" 
- style={{ fontSize:10, color:C.gold, textDecoration:"none" }}>Look up schedule< </div> 
- </div>; 
- })} 
- </div> 
- <div style={{ marginTop:20, background:C.navyL, borderRadius:10, padding:"14px 18px", bo <div style={{ fontSize:12, fontWeight:"bold", color:C.gold, marginBottom:6 }}>The Gold <div style={{ fontSize:11, color:C.grayL, lineHeight:1.6 }}> 
- Knock the week BEFORE bulk pickup — homeowners are in purge mode and motivated to cl Avoid the week OF pickup and the week AFTER. Weekly cities like Garland and Mesquite </div> 
- </div> 
- </div>; 
-} 
-// ── MAP VIEW ──────────────────────────────────────────────────────────────────
-function MapView({ zones, onCreateZone }: { zones:any[], onCreateZone:(name:string,zip:strin const mapContainer = useRef<HTMLDivElement>(null); 
- const map = useRef<any>(null); 
- const draw = useRef<any>(null); 
- const [mapLoaded, setMapLoaded] = useState(false); 
- const [searching, setSearching] = useState(false); 
- const [foundAddresses, setFoundAddresses] = useState<string[]>([]); 
- const [zipInput, setZipInput] = useState(""); 
- const [zoneName, setZoneName] = useState(""); 
- const [step, setStep] = useState<"zip"|"draw"|"review"|"done">("zip");  const [boundaryCoords, setBoundaryCoords] = useState<any>(null); 
- const [assignedRep, setAssignedRep] = useState("habibi"); 
- useEffect(() => { 
- if (map.current || !mapContainer.current) return; 
- const loadMap = async () => { 
- // Load Mapbox GL JS from CDN 
- const link = document.createElement("link"); 
- link.rel = "stylesheet"; 
- link.href = "https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css";  document.head.appendChild(link); 
- const script = document.createElement("script"); 
- script.src = "https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js";  script.onload = () => { 
- const drawScript = document.createElement("script"); 
- drawScript.src = "https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-draw/v1.4.3/ const drawLink = document.createElement("link"); 
- drawLink.rel = "stylesheet"; 
- drawLink.href = "https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-draw/v1.4.3/m document.head.appendChild(drawLink); 
- document.head.appendChild(drawScript); 
- drawScript.onload = () => { 
- const mapboxgl = (window as any).mapboxgl; 
- const MapboxDraw = (window as any).MapboxDraw; 
- mapboxgl.accessToken = MAPBOX_TOKEN; 
- map.current = new mapboxgl.Map({ 
- container: mapContainer.current!, 
- style: "mapbox://styles/mapbox/dark-v11", 
- center: [-96.7970, 32.7767], 
- zoom: 10, 
- }); 
- draw.current = new MapboxDraw({
- displayControlsDefault: false, 
- controls: { polygon: true, trash: true }, 
- defaultMode: "simple_select", 
- }); 
- map.current.addControl(draw.current); 
- map.current.addControl(new mapboxgl.NavigationControl(), "top-right"); 
- map.current.on("load", () => { 
- setMapLoaded(true); 
- // Plot existing zones as markers 
- zones.forEach(zone => { 
- if (zone.lat && zone.lng) { 
- new mapboxgl.Marker({ color: C.gold }) 
- .setLngLat([zone.lng, zone.lat]) 
- .setPopup(new mapboxgl.Popup().setHTML(`<strong>${zone.name}</strong>`))  .addTo(map.current); 
- } 
- }); 
- }); 
- map.current.on("draw.create", (e: any) => { 
- const coords = e.features[0].geometry.coordinates[0]; 
- setBoundaryCoords(coords); 
- setStep("review"); 
- }); 
- }; 
- }; 
- document.head.appendChild(script); 
- }; 
- loadMap(); 
- }, []); 
- async function searchZip() { 
- if (!zipInput.trim()) return; 
- setSearching(true); 
- setStep("draw"); 
- // Geocode the zip to center the map 
- const res = await fetch( 
- `https://api.mapbox.com/geocoding/v5/mapbox.places/${zipInput}.json?country=US&types=p ); 
- const data = await res.json(); 
- if (data.features?.length > 0) { 
- const [lng, lat] = data.features[0].center;
- map.current?.flyTo({ center: [lng, lat], zoom: 13 }); 
- setZoneName(`Zone ${zipInput}`); 
- } 
- setSearching(false); 
- } 
- async function findAddressesInBoundary() { 
- if (!boundaryCoords) return; 
- setSearching(true); 
- // Get bounding box of drawn polygon 
- const lngs = boundaryCoords.map((c: number[]) => c[0]); 
- const lats = boundaryCoords.map((c: number[]) => c[1]); 
- const minLng = Math.min(...lngs); 
- const maxLng = Math.max(...lngs); 
- const minLat = Math.min(...lats); 
- const maxLat = Math.max(...lats); 
- // Search for addresses in the bounding box 
- const res = await fetch( 
- `https://api.mapbox.com/geocoding/v5/mapbox.places/house.json?bbox=${minLng},${minLat}, ); 
- const data = await res.json(); 
- const addresses = (data.features || []).map((f: any) => f.place_name.split(",")[0] + ",  setFoundAddresses(addresses.slice(0, 30)); 
- setSearching(false); 
- } 
- useEffect(() => { 
- if (step === "review" && boundaryCoords) { 
- findAddressesInBoundary(); 
- } 
- }, [step, boundaryCoords]); 
- function handleCreateZone() { 
- if (!zoneName.trim() || foundAddresses.length === 0) return; 
- onCreateZone(zoneName, zipInput, foundAddresses); 
- setStep("done"); 
- setFoundAddresses([]); 
- setZoneName(""); 
- setZipInput(""); 
- setBoundaryCoords(null); 
- draw.current?.deleteAll(); 
- setStep("zip"); 
- }
- return ( 
- <div> 
- <div style={{ marginBottom:16 }}> 
- <div style={{ fontSize:18, fontWeight:"bold", color:C.gold, marginBottom:4 }}>Territ <div style={{ fontSize:12, color:C.gray }}>Enter a zip, draw a boundary, auto-popula </div> 
- {/* Step indicator */} 
- <div style={{ display:"flex", gap:8, marginBottom:16 }}> 
- {[["1","Enter ZIP","zip"],["2","Draw Area","draw"],["3","Review","review"]].map(([nu <div key={s} style={{ display:"flex", alignItems:"center", gap:4, padding:"4px 12p background: step===s ? C.gold : C.navyL, color: step===s ? C.navy : C.gray, font <span style={{ fontWeight:"bold" }}>{num}</span> {label} 
- </div> 
- ))} 
- </div> 
- {/* ZIP input */} 
- {step === "zip" && ( 
- <div style={{ background:C.navyL, borderRadius:10, padding:16, marginBottom:16, bord <div style={{ fontSize:12, color:C.grayL, marginBottom:10 }}>Enter the ZIP code yo <div style={{ display:"flex", gap:8 }}> 
- <input value={zipInput} onChange={e=>setZipInput(e.target.value)}  onKeyDown={e=>e.key==="Enter"&&searchZip()} 
- placeholder="e.g. 75211" 
- style={{ flex:1, background:C.navy, border:`1px solid ${C.navyM}`, borderRadiu padding:"9px 12px", color:C.white, fontSize:13, fontFamily:"inherit" }} />  <Btn col={C.gold} onClick={searchZip} disabled={searching}>  {searching ? "Loading..." : "Go"} 
- </Btn> 
- </div> 
- </div> 
- )} 
- {/* Draw instructions */} 
- {step === "draw" && ( 
- <div style={{ background:"#1a2010", border:`1px solid ${C.green}`, borderRadius:10,  <div style={{ fontSize:12, fontWeight:"bold", color:C.green, marginBottom:4 }}>Now <div style={{ fontSize:11, color:C.grayL }}>Click the polygon tool (top left of ma </div> 
- )} 
- {/* Map container */} 
- <div ref={mapContainer} style={{ width:"100%", height:400, borderRadius:10, overflow:" border:`1px solid ${C.navyM}`, marginBottom:16 }} /> 
- {!mapLoaded && (
- <div style={{ textAlign:"center" as any, color:C.gray, fontSize:12, marginTop:-200,  Loading map... 
- </div> 
- )} 
- {/* Review panel */} 
- {step === "review" && ( 
- <div style={{ background:C.navyL, borderRadius:10, padding:16, border:`1px solid ${C. <div style={{ fontSize:13, fontWeight:"bold", color:C.gold, marginBottom:12 }}>  Review — {searching ? "Finding addresses..." : `${foundAddresses.length} address </div> 
- {!searching && ( 
- <> 
- <Field label="Zone Name"> 
- <Input value={zoneName} onChange={(e:any)=>setZoneName(e.target.value)} plac </Field> 
- <Field label="Assign Rep"> 
- <div style={{ display:"flex", gap:6 }}> 
- {REPS.map(rep=>( 
- <button key={rep.id} onClick={()=>setAssignedRep(rep.id)}  style={{ display:"flex", alignItems:"center", gap:5, flex:1, padding:" borderRadius:8, border:`1px solid ${assignedRep===rep.id?rep.color:C. background:assignedRep===rep.id?`${rep.color}22`:"transparent",  color:assignedRep===rep.id?rep.color:C.gray, 
- cursor:"pointer", fontSize:11, fontFamily:"inherit" }}>  <RepBadge repId={rep.id} size={18} /> {rep.name}  </button> 
- ))} 
- </div> 
- </Field> 
- <div style={{ maxHeight:200, overflowY:"auto" as any, marginBottom:12,  background:C.navy, borderRadius:6, padding:"8px 12px" }}>  {foundAddresses.map((addr,i)=>( 
- <div key={i} style={{ fontSize:11, color:C.grayL, padding:"3px 0",  borderBottom:i<foundAddresses.length-1?`1px solid ${C.navyM}`:"none" }}>  {addr} 
- </div> 
- ))} 
- </div> 
- <div style={{ display:"flex", gap:8 }}> 
- <Btn col={C.gold} onClick={handleCreateZone} full>Create Zone with These Add <Btn col={C.gray} onClick={()=>{ setStep("draw"); draw.current?.deleteAll(); </div>
- </> 
- )} 
- </div> 
- )} 
- </div> 
- ); 
-} 
-// ── MAIN APP ────────────────────────────────────────────────────────────────── export default function App() { 
- const [zones, setZones] = useState<any[]>([]); 
- const [doors, setDoors] = useState<any[]>([]); 
- const [loading, setLoading] = useState(true); 
- const [activeView, setActiveView] = useState(VIEWS.zones); 
- const [activeZoneId, setActiveZoneId] = useState<string|null>(null);  const [doorModal, setDoorModal] = useState<any>(null); 
- const [addZoneOpen, setAddZoneOpen] = useState(false); 
- const [addDoorOpen, setAddDoorOpen] = useState(false); 
- const [filterStatus, setFilterStatus] = useState("all"); 
- const [toast, setToast] = useState<any>(null); 
- const [newZone, setNewZone] = useState({ name:"", zip:"", rep:"leti", count:10 });  const [newDoorAddr, setNewDoorAddr] = useState(""); 
- const [saving, setSaving] = useState(false); 
- const showToast = useCallback((msg:string, color=C.green) => {  setToast({ msg, color }); 
- setTimeout(()=>setToast(null), 2500); 
- }, []); 
- useEffect(()=>{ 
- async function load() { 
- setLoading(true); 
- try { 
- const [{ data:zData },{ data:dData }] = await Promise.all([  supabase.from("zones").select("*").order("created_at"),  supabase.from("doors").select("*").order("created_at"),  ]); 
- setZones(zData||[]); 
- setDoors(dData||[]); 
- setActiveZoneId((zData||[])[0]?.id||null); 
- } catch(e){ console.error(e); } 
- finally { setLoading(false); } 
- } 
- load(); 
- },[]); 
- useEffect(()=>{
- const zSub = supabase.channel("zones-rt") 
- .on("postgres_changes",{event:"*",schema:"public",table:"zones"},({eventType,new:n,old: if(eventType==="INSERT") setZones(p=>[...p,n]); 
- if(eventType==="UPDATE") setZones(p=>p.map(z=>z.id===n.id?n:z));  if(eventType==="DELETE") setZones(p=>p.filter(z=>z.id!==o.id));  }).subscribe(); 
- const dSub = supabase.channel("doors-rt") 
- .on("postgres_changes",{event:"*",schema:"public",table:"doors"},({eventType,new:n,old: if(eventType==="INSERT") setDoors(p=>[...p,n]); 
- if(eventType==="UPDATE") setDoors(p=>p.map(d=>d.id===n.id?n:d));  if(eventType==="DELETE") setDoors(p=>p.filter(d=>d.id!==o.id));  }).subscribe(); 
- return ()=>{ supabase.removeChannel(zSub); supabase.removeChannel(dSub); };  },[]); 
- async function addZone() { 
- if(!newZone.name||!newZone.zip) return; 
- setSaving(true); 
- const { data:z, error } = await supabase.from("zones") 
- .insert({ name:newZone.name, zip:newZone.zip, assigned_rep:newZone.rep })  .select().single(); 
- if(!error&&z){ 
- const count = Math.max(1,parseInt(String(newZone.count))||10); 
- await supabase.from("doors").insert( 
- Array.from({length:count},(_,i)=>({ zone_id:z.id, address:`Door ${i+1} - tap to upda ); 
- setActiveZoneId(z.id); setActiveView(VIEWS.zones); 
- setNewZone({ name:"", zip:"", rep:"leti", count:10 }); 
- setAddZoneOpen(false); showToast("Zone created"); 
- } 
- setSaving(false); 
- } 
- async function addZoneFromMap(name:string, zip:string, addresses:string[]) {  setSaving(true); 
- const { data:z, error } = await supabase.from("zones") 
- .insert({ name, zip, assigned_rep:"habibi" }) 
- .select().single(); 
- if(!error&&z){ 
- await supabase.from("doors").insert( 
- addresses.map(addr=>({ zone_id:z.id, address:addr, status:"untouched", contact:"", n ); 
- setActiveZoneId(z.id); 
- setActiveView(VIEWS.zones); 
- showToast(`Zone created with ${addresses.length} addresses!`); 
- } 
- setSaving(false);
- } 
- async function assignRep(zoneId:string, repId:string) { 
- await supabase.from("zones").update({ assigned_rep:repId }).eq("id",zoneId);  } 
- async function addDoor(zoneId:string) { 
- if(!newDoorAddr.trim()) return; 
- await supabase.from("doors").insert({ zone_id:zoneId, address:newDoorAddr.trim(), status: setNewDoorAddr(""); setAddDoorOpen(false); showToast("Door added");  } 
- async function saveDoor(updated:any) { 
- setSaving(true); 
- await supabase.from("doors").update({ address:updated.address, status:updated.status, co setDoorModal(null); 
- showToast(updated.status==="booked"?"Booked!":"Saved", updated.status==="booked"?C.green: setSaving(false); 
- } 
- const activeZone = zones.find(z=>z.id===activeZoneId); 
- const zoneDoors = useCallback((zoneId:string)=>doors.filter(d=>d.zone_id===zoneId),[doors]) const todayRoute = useMemo(()=>{ 
- const fu:any[]=[],un:any[]=[]; 
- zones.forEach(zone=>{ zoneDoors(zone.id).forEach(d=>{ if(d.status==="follow_up") fu.push return [...fu,...un]; 
- },[zones,doors]); 
- const filteredDoors = useMemo(()=>{ 
- if(!activeZone) return []; 
- const zd = zoneDoors(activeZone.id); 
- return filterStatus==="all"?zd:zd.filter(d=>d.status===filterStatus);  },[activeZone,doors,filterStatus]); 
- if(loading) return <div style={{ minHeight:"100vh", background:C.navy, display:"flex", fle <div style={{ width:48, height:48, background:C.gold, borderRadius:10, display:"flex", a <div style={{ color:C.gray, fontSize:13, letterSpacing:2, textTransform:"uppercase" as a </div>; 
- return <div style={{ minHeight:"100vh", background:C.navy, fontFamily:"'Georgia', serif",  {toast && <div style={{ position:"fixed", top:16, left:"50%", transform:"translateX(-50%) background:toast.color, color:C.navy, padding:"10px 24px", borderRadius:24,  fontWeight:"bold", fontSize:13, zIndex:999, boxShadow:"0 4px 20px rgba(0,0,0,0.4)", wh {toast.msg} 
- </div>} 
- {/* HEADER */} 
- <div style={{ background:C.navyL, borderBottom:`2px solid ${C.gold}`, padding:"0 16px", 
- <div style={{ maxWidth:960, margin:"0 auto", display:"flex", alignItems:"center", just <div style={{ display:"flex", alignItems:"center", gap:10 }}> 
- <div style={{ width:34, height:34, background:C.gold, borderRadius:6, display:"fle <div> 
- <div style={{ fontSize:12, fontWeight:"bold", letterSpacing:2, color:C.gold, tex <div style={{ fontSize:9, color:C.gray, letterSpacing:1, textTransform:"uppercas </div> 
- </div> 
- <div style={{ display:"flex", gap:4, flexWrap:"wrap" as any }}>  {[[VIEWS.zones,"Zones"],[VIEWS.route,`Route (${todayRoute.length})`],[VIEWS.reps," <button key={String(v)} onClick={()=>setActiveView(String(v))}  style={{ padding:"6px 10px", borderRadius:6, border:"none", cursor:"pointer",  fontSize:10, fontFamily:"inherit", fontWeight:"bold", 
- background:activeView===v?C.gold:"transparent", 
- color:activeView===v?C.navy:C.gray }}>{label}</button>  ))} 
- </div> 
- </div> 
- </div> 
- {/* BODY */} 
- <div style={{ flex:1, maxWidth:960, margin:"0 auto", width:"100%", padding:"20px 16px", 
- {/* ZONES */} 
- {activeView===VIEWS.zones && <> 
- <div style={{ display:"flex", gap:8, marginBottom:18, flexWrap:"wrap" as any, alignI {zones.map(z=>{ 
- const st=zoneStats(zoneDoors(z.id)); 
- const ci=getCityForZip(z.zip); 
- const bs=ci?getBulkStatus(ci):null; 
- return <button key={z.id} onClick={()=>setActiveZoneId(z.id)}  style={{ display:"flex", alignItems:"center", gap:6, padding:"7px 14px",  borderRadius:8, border:`1px solid ${activeZoneId===z.id?C.gold:C.navyM}`,  cursor:"pointer", fontFamily:"inherit", 
- background:activeZoneId===z.id?C.navyM:C.navyL, 
- color:activeZoneId===z.id?C.white:C.gray }}> 
- <RepBadge repId={z.assigned_rep} size={18} /> 
- <span style={{ fontSize:11, fontWeight:"bold" }}>{z.name}</span>  <span style={{ fontSize:10, color:activeZoneId===z.id?C.gold:C.gray }}>{st.sat {bs && <span style={{ fontSize:9, color:bs.color, background:`${bs.color}22`,  {bs.label.split(" ")[0]} 
- </span>} 
- </button>; 
- })} 
- <button onClick={()=>setAddZoneOpen(true)} 
- style={{ padding:"7px 12px", borderRadius:8, border:`1px dashed ${C.gold}`,  cursor:"pointer", fontSize:11, background:"transparent", color:C.gold, fontFam
- + Zone 
- </button> 
- </div> 
- {activeZone&&(()=>{ 
- const st=zoneStats(zoneDoors(activeZone.id)); 
- const ci=getCityForZip(activeZone.zip); 
- const bs=ci?getBulkStatus(ci):null; 
- return <> 
- <div style={{ background:C.navyL, borderRadius:10, padding:"16px 20px", marginBo <div style={{ display:"flex", flexWrap:"wrap" as any, gap:12, alignItems:"flex <div> 
- <div style={{ fontSize:16, fontWeight:"bold" }}>{activeZone.name}</div>  <div style={{ fontSize:11, color:C.gray, marginTop:2 }}>ZIP {activeZone.zi {bs&&ci&&<div style={{ marginTop:8, padding:"6px 12px", borderRadius:8,  background:`${bs.color}15`, border:`1px solid ${bs.color}`,  fontSize:11, color:bs.color, display:"inline-block" }}>  {bs.label} · {ci.city} bulk pickup 
- </div>} 
- {ci&&<div style={{ marginTop:6, fontSize:10, color:C.gold, fontStyle:"ital </div> 
- <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" as <span style={{ fontSize:10, color:C.gray }}>Assigned to</span>  {REPS.map(rep=>( 
- <button key={rep.id} onClick={()=>assignRep(activeZone.id,rep.id)}  style={{ display:"flex", alignItems:"center", gap:5, padding:"5px 10px border:`1px solid ${activeZone.assigned_rep===rep.id?rep.color:C.nav background:activeZone.assigned_rep===rep.id?`${rep.color}22`:"transp color:activeZone.assigned_rep===rep.id?rep.color:C.gray,  cursor:"pointer", fontSize:11, fontFamily:"inherit" }}>  <RepBadge repId={rep.id} size={18} /> {rep.name}  </button> 
- ))} 
- </div> 
- </div> 
- </div> 
- <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:8, margin {[["Saturation",`${st.saturation}%`,C.gold],["Knocked",`${st.knocked}/${st.tot <div key={String(l)} style={{ background:C.navyL, borderRadius:8, padding:"1 <div style={{ fontSize:20, fontWeight:"bold", color:String(col) }}>{v}</di <div style={{ fontSize:9, color:C.gray, textTransform:"uppercase" as any,  </div> 
- ))} 
- </div> 
- <div style={{ height:5, background:C.navyM, borderRadius:3, overflow:"hidden", m
- <div style={{ height:"100%", width:`${st.saturation}%`, background:`linear-gra </div> 
- <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center <div style={{ display:"flex", gap:5, flexWrap:"wrap" as any }}>  <Chip active={filterStatus==="all"} col={C.gold} onClick={()=>setFilterStatu {Object.entries(STATUS).map(([k,s])=>( 
- <Chip key={k} active={filterStatus===k} col={s.color} onClick={()=>setFilt ))} 
- </div> 
- <button onClick={()=>setAddDoorOpen(true)} 
- style={{ padding:"6px 14px", borderRadius:8, border:`1px solid ${C.gold}`, c + Door 
- </button> 
- </div> 
- <div style={{ display:"flex", flexDirection:"column", gap:6 }}>  {filteredDoors.map(door=>{ 
- const s=STATUS[door.status]; 
- return <div key={door.id} onClick={()=>setDoorModal({door,zoneName:activeZon style={{ background:C.navyL, border:`1px solid ${C.navyM}`, borderLeft:`4p borderRadius:8, padding:"13px 16px", cursor:"pointer", display:"flex", a <span style={{ fontSize:18, minWidth:22, textAlign:"center" as any }}>{s.i <div style={{ flex:1, minWidth:0 }}> 
- <div style={{ fontSize:13, color:C.white, overflow:"hidden", textOverflo {door.contact&&<div style={{ fontSize:10, color:C.gray, marginTop:2 }}> {door.notes&&<div style={{ fontSize:10, color:C.gray, marginTop:1, fontS </div> 
- <span style={{ fontSize:10, color:s.color, textTransform:"uppercase" as an </div>; 
- })} 
- {filteredDoors.length===0&&<div style={{ textAlign:"center" as any, color:C.gr </div> 
- {addDoorOpen&&<div style={{ marginTop:12, background:C.navyL, border:`1px solid  <input value={newDoorAddr} onChange={e=>setNewDoorAddr(e.target.value)}  placeholder="Enter street address..." 
- onKeyDown={(e:any)=>e.key==="Enter"&&addDoor(activeZone.id)}  style={{ flex:1, background:C.navy, border:`1px solid ${C.navyM}`, borderRad <Btn col={C.gold} onClick={()=>addDoor(activeZone.id)}>Add</Btn>  <Btn col={C.gray} onClick={()=>setAddDoorOpen(false)}>X</Btn>  </div>} 
- </>; 
- })()} 
- </>} 
- {/* ROUTE */}
- {activeView===VIEWS.route&&<> 
- <div style={{ marginBottom:18 }}> 
- <div style={{ fontSize:18, fontWeight:"bold", color:C.gold, marginBottom:4 }}>Toda <div style={{ fontSize:12, color:C.gray }}>Follow-ups first, then untouched · {tod </div> 
- {zones.map(zone=>{ 
- const fu=zoneDoors(zone.id).filter(d=>d.status==="follow_up");  const un=zoneDoors(zone.id).filter(d=>d.status==="untouched");  if(!fu.length&&!un.length) return null; 
- const ci=getCityForZip(zone.zip); 
- const bs=ci?getBulkStatus(ci):null; 
- return <div key={zone.id} style={{ marginBottom:22 }}> 
- <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6, flexWr <RepBadge repId={zone.assigned_rep} size={22} /> 
- <span style={{ fontSize:13, fontWeight:"bold" }}>{zone.name}</span>  <span style={{ fontSize:11, color:C.gray }}>{zone.zip}</span>  {bs&&<span style={{ fontSize:9, color:bs.color, background:`${bs.color}22`, pa <div style={{ marginLeft:"auto", display:"flex", gap:6 }}>  {fu.length>0&&<span style={{ fontSize:10, color:C.orange, background:"#2a1f0 {un.length>0&&<span style={{ fontSize:10, color:C.gray, background:C.navyL,  </div> 
- </div> 
- {fu.map(door=><RouteCard key={door.id} door={door} zoneName={zone.name} zoneZip={ {un.map(door=><RouteCard key={door.id} door={door} zoneName={zone.name} zoneZip={ </div>; 
- })} 
- {todayRoute.length===0&&<div style={{ textAlign:"center" as any, color:C.gray, paddi </>} 
- {/* REPS */} 
- {activeView===VIEWS.reps&&<> 
- <div style={{ fontSize:18, fontWeight:"bold", color:C.gold, marginBottom:18 }}>Rep O <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr) {REPS.map(rep=>{ 
- const rZones=zones.filter(z=>z.assigned_rep===rep.id); 
- const allDoors=rZones.flatMap(z=>zoneDoors(z.id)); 
- return <div key={rep.id} style={{ background:C.navyL, border:`1px solid ${C.navy <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14 }}>  <RepBadge repId={rep.id} size={40} /> 
- <div> 
- <div style={{ fontSize:15, fontWeight:"bold" }}>{rep.name}</div>  <div style={{ fontSize:10, color:C.gray }}>{rZones.length} zone{rZones.len </div> 
- </div> 
- <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBott {[["Doors",allDoors.length,C.gray],["Knocked",allDoors.filter(d=>d.status!== <div key={String(l)} style={{ background:C.navyD, borderRadius:6, padding:
- <div style={{ fontSize:18, fontWeight:"bold", color:String(col) }}>{v}</ <div style={{ fontSize:9, color:C.gray, textTransform:"uppercase" as any, </div> 
- ))} 
- </div> 
- {rZones.map(z=>{ 
- const st=zoneStats(zoneDoors(z.id)); 
- return <div key={z.id} onClick={()=>{ setActiveZoneId(z.id); setActiveView(V style={{ display:"flex", justifyContent:"space-between", alignItems:"cente padding:"6px 10px", borderRadius:6, marginBottom:4, cursor:"pointer",  background:C.navy, border:`1px solid ${C.navyM}` }}>  <span style={{ fontSize:11 }}>{z.name}</span> 
- <span style={{ fontSize:10, color:C.gold }}>{st.saturation}%</span>  </div>; 
- })} 
- </div>; 
- })} 
- </div> 
- </>} 
- {/* BULK */} 
- {activeView===VIEWS.bulk&&<BulkCalendarView />} 
- {/* MAP */} 
- {activeView===VIEWS.map&&<MapView zones={zones} onCreateZone={addZoneFromMap} />}  </div> 
- {/* ADD ZONE MODAL */} 
- {addZoneOpen&&<Modal title="New Territory Zone" onClose={()=>setAddZoneOpen(false)}>  <Field label="Neighborhood Name"><Input value={newZone.name} onChange={(e:any)=>setNew <Field label="Zip Code"><Input value={newZone.zip} onChange={(e:any)=>setNewZone(p=>({. <Field label="# of Doors"><Input type="number" value={newZone.count} onChange={(e:any) <Field label="Assign Rep"> 
- <div style={{ display:"flex", gap:6 }}> 
- {REPS.map(rep=>( 
- <button key={rep.id} onClick={()=>setNewZone(p=>({...p,rep:rep.id}))}  style={{ display:"flex", alignItems:"center", gap:5, flex:1, padding:"7px 8px",  borderRadius:8, border:`1px solid ${newZone.rep===rep.id?rep.color:C.navyM}`,  background:newZone.rep===rep.id?`${rep.color}22`:"transparent",  color:newZone.rep===rep.id?rep.color:C.gray, 
- cursor:"pointer", fontSize:11, fontFamily:"inherit" }}>  <RepBadge repId={rep.id} size={18} /> {rep.name} 
- </button> 
- ))} 
- </div> 
- </Field>
- <div style={{ display:"flex", gap:8, marginTop:20 }}> 
- <Btn col={C.gold} onClick={addZone} full disabled={saving}>{saving?"Creating...":"Cr <Btn col={C.gray} onClick={()=>setAddZoneOpen(false)} full>Cancel</Btn>  </div> 
- </Modal>} 
- {/* DOOR MODAL */} 
- {doorModal&&<DoorModal door={doorModal.door} zoneName={doorModal.zoneName} onSave={saveD </div>; 
+import { useState, useEffect, useRef, useCallback } from "react";
+import { createClient } from "@supabase/supabase-js";
+import mapboxgl from "mapbox-gl";
+import "mapbox-gl/dist/mapbox-gl.css";
+
+// ─── Supabase ────────────────────────────────────────────────────────────────
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL ?? "",
+  import.meta.env.VITE_SUPABASE_ANON_KEY ?? ""
+);
+
+// ─── Mapbox ──────────────────────────────────────────────────────────────────
+mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN ?? "";
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+interface Zone {
+  id: string;
+  name: string;
+  color: string;
+  territory_geojson?: GeoJSON.GeoJSON | null;
+  created_at?: string;
+}
+
+interface Door {
+  id: string;
+  zone_id: string;
+  address: string;
+  lat: number;
+  lng: number;
+  status: "not_contacted" | "contacted" | "interested" | "not_interested" | "sold";
+  notes?: string;
+  created_at?: string;
+}
+
+interface Route {
+  id: string;
+  zone_id: string;
+  name: string;
+  door_ids: string[];
+  created_at?: string;
+}
+
+interface Rep {
+  id: string;
+  name: string;
+  email: string;
+  phone?: string;
+  zone_ids: string[];
+  created_at?: string;
+}
+
+interface BulkPickup {
+  id: string;
+  zone_id: string;
+  date: string;
+  notes?: string;
+  created_at?: string;
+}
+
+type Tab = "zones" | "doors" | "routes" | "reps" | "calendar" | "map";
+
+// ─── Colour palette ──────────────────────────────────────────────────────────
+const ZONE_COLORS = [
+  "#C9A84C", "#E8C96D", "#A07C30", "#FFD580",
+  "#4C7FA8", "#2E5F8A", "#6BAED6", "#9ECAE1",
+];
+
+const STATUS_META: Record<Door["status"], { label: string; color: string }> = {
+  not_contacted: { label: "Not Contacted", color: "#64748b" },
+  contacted:     { label: "Contacted",     color: "#3B82F6" },
+  interested:    { label: "Interested",    color: "#C9A84C" },
+  not_interested:{ label: "Not Interested",color: "#EF4444" },
+  sold:          { label: "Sold",          color: "#22C55E" },
+};
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const uid = () => crypto.randomUUID();
+const today = () => new Date().toISOString().slice(0, 10);
+
+// ─── Components ──────────────────────────────────────────────────────────────
+
+function Badge({ status }: { status: Door["status"] }) {
+  const m = STATUS_META[status];
+  return (
+    <span
+      style={{
+        background: m.color + "22",
+        color: m.color,
+        border: `1px solid ${m.color}55`,
+        borderRadius: 6,
+        padding: "2px 10px",
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: 0.5,
+        textTransform: "uppercase",
+      }}
+    >
+      {m.label}
+    </span>
+  );
+}
+
+function Modal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(5,10,25,0.75)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000, backdropFilter: "blur(4px)",
+      }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div
+        style={{
+          background: "#0D1B35",
+          border: "1px solid #C9A84C44",
+          borderRadius: 14,
+          padding: 28,
+          width: "min(520px, 94vw)",
+          maxHeight: "88vh",
+          overflowY: "auto",
+          boxShadow: "0 24px 64px rgba(0,0,0,0.6)",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+          <h3 style={{ margin: 0, color: "#C9A84C", fontSize: 17, fontFamily: "Georgia, serif", letterSpacing: 0.5 }}>{title}</h3>
+          <button onClick={onClose} style={btnGhost}>✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ─── Inline styles helpers ────────────────────────────────────────────────────
+const inputStyle: React.CSSProperties = {
+  width: "100%", padding: "9px 13px", borderRadius: 8,
+  border: "1px solid #1E3A5F", background: "#071220",
+  color: "#E8D5A0", fontSize: 14, outline: "none", boxSizing: "border-box",
+  fontFamily: "'Courier New', monospace",
+};
+
+const btnPrimary: React.CSSProperties = {
+  background: "linear-gradient(135deg,#C9A84C,#A07C30)",
+  color: "#050D1A", border: "none", borderRadius: 8,
+  padding: "9px 20px", fontWeight: 700, cursor: "pointer",
+  fontSize: 13, letterSpacing: 0.4,
+};
+
+const btnGhost: React.CSSProperties = {
+  background: "transparent", color: "#8AACCA",
+  border: "1px solid #1E3A5F", borderRadius: 8,
+  padding: "8px 16px", cursor: "pointer", fontSize: 13,
+};
+
+const btnDanger: React.CSSProperties = {
+  background: "transparent", color: "#EF4444",
+  border: "1px solid #EF444440", borderRadius: 8,
+  padding: "6px 14px", cursor: "pointer", fontSize: 12,
+};
+
+function Field({
+  label, children,
+}: {
+  label: string; children: React.ReactNode;
+}) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <label style={{ display: "block", color: "#8AACCA", fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", marginBottom: 5 }}>
+        {label}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+// ─── ZonesTab ─────────────────────────────────────────────────────────────────
+function ZonesTab({ zones, setZones }: { zones: Zone[]; setZones: (z: Zone[]) => void }) {
+  const [showModal, setShowModal] = useState(false);
+  const [name, setName] = useState("");
+  const [color, setColor] = useState(ZONE_COLORS[0]);
+  const [loading, setLoading] = useState(false);
+
+  const add = async () => {
+    if (!name.trim()) return;
+    setLoading(true);
+    const zone: Zone = { id: uid(), name: name.trim(), color };
+    const { error } = await supabase.from("zones").insert(zone);
+    if (!error) setZones([...zones, zone]);
+    setName(""); setColor(ZONE_COLORS[0]); setShowModal(false); setLoading(false);
+  };
+
+  const remove = async (id: string) => {
+    await supabase.from("zones").delete().eq("id", id);
+    setZones(zones.filter((z) => z.id !== id));
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h2 style={sectionTitle}>Zones</h2>
+        <button style={btnPrimary} onClick={() => setShowModal(true)}>+ Add Zone</button>
+      </div>
+      <div style={{ display: "grid", gap: 12 }}>
+        {zones.map((z) => (
+          <div key={z.id} style={card}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 16, height: 16, borderRadius: "50%", background: z.color, flexShrink: 0 }} />
+              <span style={{ color: "#E8D5A0", fontWeight: 600 }}>{z.name}</span>
+            </div>
+            <button style={btnDanger} onClick={() => remove(z.id)}>Remove</button>
+          </div>
+        ))}
+        {zones.length === 0 && <Empty text="No zones yet. Add your first zone." />}
+      </div>
+      {showModal && (
+        <Modal title="Add Zone" onClose={() => setShowModal(false)}>
+          <Field label="Zone Name">
+            <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. North District" />
+          </Field>
+          <Field label="Color">
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {ZONE_COLORS.map((c) => (
+                <div
+                  key={c}
+                  onClick={() => setColor(c)}
+                  style={{
+                    width: 28, height: 28, borderRadius: "50%", background: c, cursor: "pointer",
+                    outline: color === c ? "3px solid #fff" : "none", outlineOffset: 2,
+                  }}
+                />
+              ))}
+            </div>
+          </Field>
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button style={btnPrimary} onClick={add} disabled={loading}>{loading ? "Saving…" : "Save Zone"}</button>
+            <button style={btnGhost} onClick={() => setShowModal(false)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ─── DoorsTab ─────────────────────────────────────────────────────────────────
+function DoorsTab({ zones, doors, setDoors }: { zones: Zone[]; doors: Door[]; setDoors: (d: Door[]) => void }) {
+  const [showModal, setShowModal] = useState(false);
+  const [form, setForm] = useState<Partial<Door>>({ status: "not_contacted" });
+  const [filterZone, setFilterZone] = useState<string>("all");
+  const [filterStatus, setFilterStatus] = useState<string>("all");
+  const [loading, setLoading] = useState(false);
+
+  const f = (k: keyof Door, v: string | number) => setForm((p) => ({ ...p, [k]: v }));
+
+  const add = async () => {
+    if (!form.address || !form.zone_id) return;
+    setLoading(true);
+    const door: Door = {
+      id: uid(),
+      zone_id: form.zone_id!,
+      address: form.address!,
+      lat: Number(form.lat ?? 0),
+      lng: Number(form.lng ?? 0),
+      status: (form.status as Door["status"]) ?? "not_contacted",
+      notes: form.notes ?? "",
+    };
+    const { error } = await supabase.from("doors").insert(door);
+    if (!error) setDoors([...doors, door]);
+    setForm({ status: "not_contacted" }); setShowModal(false); setLoading(false);
+  };
+
+  const updateStatus = async (id: string, status: Door["status"]) => {
+    await supabase.from("doors").update({ status }).eq("id", id);
+    setDoors(doors.map((d) => (d.id === id ? { ...d, status } : d)));
+  };
+
+  const remove = async (id: string) => {
+    await supabase.from("doors").delete().eq("id", id);
+    setDoors(doors.filter((d) => d.id !== id));
+  };
+
+  const filtered = doors.filter((d) => {
+    if (filterZone !== "all" && d.zone_id !== filterZone) return false;
+    if (filterStatus !== "all" && d.status !== filterStatus) return false;
+    return true;
+  });
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={sectionTitle}>Doors <span style={{ color: "#8AACCA", fontWeight: 400, fontSize: 14 }}>({filtered.length})</span></h2>
+        <button style={btnPrimary} onClick={() => setShowModal(true)}>+ Add Door</button>
+      </div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <select style={{ ...inputStyle, width: "auto" }} value={filterZone} onChange={(e) => setFilterZone(e.target.value)}>
+          <option value="all">All Zones</option>
+          {zones.map((z) => <option key={z.id} value={z.id}>{z.name}</option>)}
+        </select>
+        <select style={{ ...inputStyle, width: "auto" }} value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+          <option value="all">All Statuses</option>
+          {Object.entries(STATUS_META).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+        </select>
+      </div>
+      <div style={{ display: "grid", gap: 10 }}>
+        {filtered.map((d) => {
+          const zone = zones.find((z) => z.id === d.zone_id);
+          return (
+            <div key={d.id} style={{ ...card, flexDirection: "column", alignItems: "flex-start", gap: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
+                <div>
+                  <span style={{ color: "#E8D5A0", fontWeight: 600 }}>{d.address}</span>
+                  {zone && (
+                    <span style={{ marginLeft: 10, fontSize: 11, color: zone.color, background: zone.color + "22", padding: "2px 8px", borderRadius: 5, border: `1px solid ${zone.color}44` }}>
+                      {zone.name}
+                    </span>
+                  )}
+                </div>
+                <button style={btnDanger} onClick={() => remove(d.id)}>✕</button>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {Object.keys(STATUS_META).map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => updateStatus(d.id, s as Door["status"])}
+                    style={{
+                      ...btnGhost,
+                      padding: "4px 10px",
+                      fontSize: 11,
+                      background: d.status === s ? STATUS_META[s as Door["status"]].color + "33" : "transparent",
+                      color: d.status === s ? STATUS_META[s as Door["status"]].color : "#8AACCA",
+                      borderColor: d.status === s ? STATUS_META[s as Door["status"]].color + "88" : "#1E3A5F",
+                    }}
+                  >
+                    {STATUS_META[s as Door["status"]].label}
+                  </button>
+                ))}
+              </div>
+              {d.notes && <p style={{ margin: 0, color: "#8AACCA", fontSize: 12 }}>{d.notes}</p>}
+            </div>
+          );
+        })}
+        {filtered.length === 0 && <Empty text="No doors match filters." />}
+      </div>
+      {showModal && (
+        <Modal title="Add Door" onClose={() => setShowModal(false)}>
+          <Field label="Zone">
+            <select style={inputStyle} value={form.zone_id ?? ""} onChange={(e) => f("zone_id", e.target.value)}>
+              <option value="">Select a zone</option>
+              {zones.map((z) => <option key={z.id} value={z.id}>{z.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Address">
+            <input style={inputStyle} value={form.address ?? ""} onChange={(e) => f("address", e.target.value)} placeholder="123 Main St" />
+          </Field>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Field label="Latitude">
+              <input style={inputStyle} type="number" value={form.lat ?? ""} onChange={(e) => f("lat", e.target.value)} placeholder="0.0000" />
+            </Field>
+            <Field label="Longitude">
+              <input style={inputStyle} type="number" value={form.lng ?? ""} onChange={(e) => f("lng", e.target.value)} placeholder="0.0000" />
+            </Field>
+          </div>
+          <Field label="Notes">
+            <textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical" }} value={form.notes ?? ""} onChange={(e) => f("notes", e.target.value)} placeholder="Optional notes…" />
+          </Field>
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button style={btnPrimary} onClick={add} disabled={loading}>{loading ? "Saving…" : "Add Door"}</button>
+            <button style={btnGhost} onClick={() => setShowModal(false)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ─── RoutesTab ────────────────────────────────────────────────────────────────
+function RoutesTab({ zones, doors, routes, setRoutes }: { zones: Zone[]; doors: Door[]; routes: Route[]; setRoutes: (r: Route[]) => void }) {
+  const [showModal, setShowModal] = useState(false);
+  const [name, setName] = useState("");
+  const [zoneId, setZoneId] = useState("");
+  const [selectedDoors, setSelectedDoors] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const zoneDoors = doors.filter((d) => d.zone_id === zoneId);
+
+  const toggleDoor = (id: string) =>
+    setSelectedDoors((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+
+  const add = async () => {
+    if (!name.trim() || !zoneId) return;
+    setLoading(true);
+    const route: Route = { id: uid(), name: name.trim(), zone_id: zoneId, door_ids: selectedDoors };
+    const { error } = await supabase.from("routes").insert(route);
+    if (!error) setRoutes([...routes, route]);
+    setName(""); setZoneId(""); setSelectedDoors([]); setShowModal(false); setLoading(false);
+  };
+
+  const remove = async (id: string) => {
+    await supabase.from("routes").delete().eq("id", id);
+    setRoutes(routes.filter((r) => r.id !== id));
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h2 style={sectionTitle}>Routes</h2>
+        <button style={btnPrimary} onClick={() => setShowModal(true)}>+ New Route</button>
+      </div>
+      <div style={{ display: "grid", gap: 12 }}>
+        {routes.map((r) => {
+          const zone = zones.find((z) => z.id === r.zone_id);
+          return (
+            <div key={r.id} style={card}>
+              <div>
+                <div style={{ color: "#E8D5A0", fontWeight: 700, marginBottom: 4 }}>{r.name}</div>
+                <div style={{ fontSize: 12, color: "#8AACCA" }}>
+                  {zone?.name} · {r.door_ids.length} stops
+                </div>
+              </div>
+              <button style={btnDanger} onClick={() => remove(r.id)}>Remove</button>
+            </div>
+          );
+        })}
+        {routes.length === 0 && <Empty text="No routes yet." />}
+      </div>
+      {showModal && (
+        <Modal title="Create Route" onClose={() => setShowModal(false)}>
+          <Field label="Route Name">
+            <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Route Alpha" />
+          </Field>
+          <Field label="Zone">
+            <select style={inputStyle} value={zoneId} onChange={(e) => { setZoneId(e.target.value); setSelectedDoors([]); }}>
+              <option value="">Select zone</option>
+              {zones.map((z) => <option key={z.id} value={z.id}>{z.name}</option>)}
+            </select>
+          </Field>
+          {zoneId && (
+            <Field label={`Stops (${selectedDoors.length} selected)`}>
+              <div style={{ maxHeight: 200, overflowY: "auto", border: "1px solid #1E3A5F", borderRadius: 8, padding: 10, display: "grid", gap: 6 }}>
+                {zoneDoors.length === 0 && <span style={{ color: "#8AACCA", fontSize: 13 }}>No doors in this zone yet.</span>}
+                {zoneDoors.map((d) => (
+                  <label key={d.id} style={{ display: "flex", gap: 8, cursor: "pointer", color: "#E8D5A0", fontSize: 13 }}>
+                    <input type="checkbox" checked={selectedDoors.includes(d.id)} onChange={() => toggleDoor(d.id)} />
+                    {d.address}
+                  </label>
+                ))}
+              </div>
+            </Field>
+          )}
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button style={btnPrimary} onClick={add} disabled={loading}>{loading ? "Saving…" : "Create Route"}</button>
+            <button style={btnGhost} onClick={() => setShowModal(false)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ─── RepsTab ──────────────────────────────────────────────────────────────────
+function RepsTab({ zones, reps, setReps }: { zones: Zone[]; reps: Rep[]; setReps: (r: Rep[]) => void }) {
+  const [showModal, setShowModal] = useState(false);
+  const [form, setForm] = useState<Partial<Rep>>({ zone_ids: [] });
+  const [loading, setLoading] = useState(false);
+
+  const f = (k: keyof Rep, v: string | string[]) => setForm((p) => ({ ...p, [k]: v }));
+
+  const toggleZone = (id: string) => {
+    const cur = form.zone_ids ?? [];
+    f("zone_ids", cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
+  };
+
+  const add = async () => {
+    if (!form.name?.trim() || !form.email?.trim()) return;
+    setLoading(true);
+    const rep: Rep = { id: uid(), name: form.name!, email: form.email!, phone: form.phone ?? "", zone_ids: form.zone_ids ?? [] };
+    const { error } = await supabase.from("reps").insert(rep);
+    if (!error) setReps([...reps, rep]);
+    setForm({ zone_ids: [] }); setShowModal(false); setLoading(false);
+  };
+
+  const remove = async (id: string) => {
+    await supabase.from("reps").delete().eq("id", id);
+    setReps(reps.filter((r) => r.id !== id));
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h2 style={sectionTitle}>Reps</h2>
+        <button style={btnPrimary} onClick={() => setShowModal(true)}>+ Add Rep</button>
+      </div>
+      <div style={{ display: "grid", gap: 12 }}>
+        {reps.map((r) => (
+          <div key={r.id} style={{ ...card, alignItems: "flex-start", flexDirection: "column" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
+              <div>
+                <div style={{ color: "#E8D5A0", fontWeight: 700 }}>{r.name}</div>
+                <div style={{ color: "#8AACCA", fontSize: 12, marginTop: 2 }}>{r.email} {r.phone ? `· ${r.phone}` : ""}</div>
+              </div>
+              <button style={btnDanger} onClick={() => remove(r.id)}>✕</button>
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+              {r.zone_ids.map((zid) => {
+                const z = zones.find((x) => x.id === zid);
+                return z ? (
+                  <span key={zid} style={{ fontSize: 11, color: z.color, background: z.color + "22", padding: "2px 8px", borderRadius: 5, border: `1px solid ${z.color}44` }}>
+                    {z.name}
+                  </span>
+                ) : null;
+              })}
+            </div>
+          </div>
+        ))}
+        {reps.length === 0 && <Empty text="No reps yet." />}
+      </div>
+      {showModal && (
+        <Modal title="Add Rep" onClose={() => setShowModal(false)}>
+          <Field label="Full Name">
+            <input style={inputStyle} value={form.name ?? ""} onChange={(e) => f("name", e.target.value)} placeholder="Jane Smith" />
+          </Field>
+          <Field label="Email">
+            <input style={inputStyle} type="email" value={form.email ?? ""} onChange={(e) => f("email", e.target.value)} placeholder="jane@example.com" />
+          </Field>
+          <Field label="Phone">
+            <input style={inputStyle} value={form.phone ?? ""} onChange={(e) => f("phone", e.target.value)} placeholder="+1 (555) 000-0000" />
+          </Field>
+          <Field label="Assigned Zones">
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {zones.map((z) => {
+                const sel = (form.zone_ids ?? []).includes(z.id);
+                return (
+                  <button
+                    key={z.id}
+                    onClick={() => toggleZone(z.id)}
+                    style={{ ...btnGhost, fontSize: 12, background: sel ? z.color + "33" : "transparent", color: sel ? z.color : "#8AACCA", borderColor: sel ? z.color + "88" : "#1E3A5F" }}
+                  >
+                    {z.name}
+                  </button>
+                );
+              })}
+            </div>
+          </Field>
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button style={btnPrimary} onClick={add} disabled={loading}>{loading ? "Saving…" : "Add Rep"}</button>
+            <button style={btnGhost} onClick={() => setShowModal(false)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ─── CalendarTab ──────────────────────────────────────────────────────────────
+function CalendarTab({ zones, pickups, setPickups }: { zones: Zone[]; pickups: BulkPickup[]; setPickups: (p: BulkPickup[]) => void }) {
+  const [showModal, setShowModal] = useState(false);
+  const [form, setForm] = useState<Partial<BulkPickup>>({ date: today() });
+  const [loading, setLoading] = useState(false);
+
+  const f = (k: keyof BulkPickup, v: string) => setForm((p) => ({ ...p, [k]: v }));
+
+  const add = async () => {
+    if (!form.zone_id || !form.date) return;
+    setLoading(true);
+    const pickup: BulkPickup = { id: uid(), zone_id: form.zone_id!, date: form.date!, notes: form.notes ?? "" };
+    const { error } = await supabase.from("bulk_pickups").insert(pickup);
+    if (!error) setPickups([...pickups, pickup]);
+    setForm({ date: today() }); setShowModal(false); setLoading(false);
+  };
+
+  const remove = async (id: string) => {
+    await supabase.from("bulk_pickups").delete().eq("id", id);
+    setPickups(pickups.filter((p) => p.id !== id));
+  };
+
+  const sorted = [...pickups].sort((a, b) => a.date.localeCompare(b.date));
+
+  // Group by month
+  const grouped: Record<string, BulkPickup[]> = {};
+  for (const p of sorted) {
+    const month = p.date.slice(0, 7);
+    grouped[month] = grouped[month] ? [...grouped[month], p] : [p];
+  }
+
+  const formatDate = (d: string) => new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  const formatMonth = (m: string) => new Date(m + "-01").toLocaleDateString(undefined, { year: "numeric", month: "long" });
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h2 style={sectionTitle}>Bulk Pickup Calendar</h2>
+        <button style={btnPrimary} onClick={() => setShowModal(true)}>+ Add Pickup</button>
+      </div>
+      {Object.keys(grouped).length === 0 && <Empty text="No pickups scheduled." />}
+      {Object.entries(grouped).map(([month, items]) => (
+        <div key={month} style={{ marginBottom: 24 }}>
+          <h4 style={{ color: "#C9A84C", fontFamily: "Georgia, serif", margin: "0 0 12px", letterSpacing: 1 }}>{formatMonth(month)}</h4>
+          <div style={{ display: "grid", gap: 10 }}>
+            {items.map((p) => {
+              const zone = zones.find((z) => z.id === p.zone_id);
+              const isPast = p.date < today();
+              return (
+                <div key={p.id} style={{ ...card, opacity: isPast ? 0.6 : 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ textAlign: "center", minWidth: 48, background: "#071220", borderRadius: 8, padding: "6px 10px", border: "1px solid #1E3A5F" }}>
+                      <div style={{ color: "#C9A84C", fontSize: 11, fontWeight: 700 }}>{new Date(p.date + "T00:00:00").toLocaleDateString(undefined, { month: "short" }).toUpperCase()}</div>
+                      <div style={{ color: "#E8D5A0", fontSize: 20, fontWeight: 800, lineHeight: 1 }}>{new Date(p.date + "T00:00:00").getDate()}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: "#E8D5A0", fontWeight: 600 }}>{formatDate(p.date)}</div>
+                      {zone && <div style={{ fontSize: 12, color: zone.color }}>{zone.name}</div>}
+                      {p.notes && <div style={{ fontSize: 12, color: "#8AACCA", marginTop: 2 }}>{p.notes}</div>}
+                    </div>
+                  </div>
+                  <button style={btnDanger} onClick={() => remove(p.id)}>✕</button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      {showModal && (
+        <Modal title="Schedule Bulk Pickup" onClose={() => setShowModal(false)}>
+          <Field label="Zone">
+            <select style={inputStyle} value={form.zone_id ?? ""} onChange={(e) => f("zone_id", e.target.value)}>
+              <option value="">Select zone</option>
+              {zones.map((z) => <option key={z.id} value={z.id}>{z.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Date">
+            <input style={inputStyle} type="date" value={form.date ?? today()} onChange={(e) => f("date", e.target.value)} />
+          </Field>
+          <Field label="Notes">
+            <input style={inputStyle} value={form.notes ?? ""} onChange={(e) => f("notes", e.target.value)} placeholder="Optional notes…" />
+          </Field>
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button style={btnPrimary} onClick={add} disabled={loading}>{loading ? "Saving…" : "Schedule"}</button>
+            <button style={btnGhost} onClick={() => setShowModal(false)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ─── MapTab ───────────────────────────────────────────────────────────────────
+function MapTab({ zones, doors, setZones }: { zones: Zone[]; doors: Door[]; setZones: (z: Zone[]) => void }) {
+  const mapContainer = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<mapboxgl.Map | null>(null);
+  const [activeZone, setActiveZone] = useState<string>("");
+  const [drawing, setDrawing] = useState(false);
+  const [mapReady, setMapReady] = useState(false);
+  const markersRef = useRef<mapboxgl.Marker[]>([]);
+
+  useEffect(() => {
+    if (!mapContainer.current || mapRef.current) return;
+    const map = new mapboxgl.Map({
+      container: mapContainer.current,
+      style: "mapbox://styles/mapbox/dark-v11",
+      center: [-96.6989, 33.1972],
+      zoom: 11,
+    });
+    map.addControl(new mapboxgl.NavigationControl(), "top-right");
+    map.on("load", () => {
+      mapRef.current = map;
+      setMapReady(true);
+    });
+    return () => { map.remove(); mapRef.current = null; };
+  }, []);
+
+  // Plot door markers
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
+    doors.forEach((d) => {
+      if (!d.lat && !d.lng) return;
+      const el = document.createElement("div");
+      el.style.cssText = `width:12px;height:12px;border-radius:50%;background:${STATUS_META[d.status].color};border:2px solid #fff;box-shadow:0 0 6px rgba(0,0,0,0.5);cursor:pointer;`;
+      const marker = new mapboxgl.Marker(el).setLngLat([d.lng, d.lat]).setPopup(new mapboxgl.Popup({ offset: 8 }).setHTML(`<div style="background:#0D1B35;color:#E8D5A0;padding:8px 12px;border-radius:8px;font-size:13px;"><strong>${d.address}</strong><br/><span style="color:${STATUS_META[d.status].color}">${STATUS_META[d.status].label}</span></div>`)).addTo(mapRef.current!);
+      markersRef.current.push(marker);
+    });
+  }, [doors, mapReady]);
+
+  const saveTerritory = useCallback(async (zoneId: string, geojson: GeoJSON.GeoJSON) => {
+    await supabase.from("zones").update({ territory_geojson: geojson }).eq("id", zoneId);
+    setZones(zones.map((z) => z.id === zoneId ? { ...z, territory_geojson: geojson } : z));
+  }, [zones, setZones]);
+
+  // Draw territory polygon on click when in drawing mode
+  const coordsRef = useRef<[number, number][]>([]);
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+    const onClick = (e: mapboxgl.MapMouseEvent) => {
+      if (!drawing || !activeZone) return;
+      coordsRef.current = [...coordsRef.current, [e.lngLat.lng, e.lngLat.lat]];
+    };
+    map.on("click", onClick);
+    return () => { map.off("click", onClick); };
+  }, [drawing, activeZone, mapReady]);
+
+  const finishDrawing = () => {
+    if (!activeZone || coordsRef.current.length < 3) return;
+    const coords = [...coordsRef.current, coordsRef.current[0]];
+    const geojson: GeoJSON.GeoJSON = { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [coords] } };
+    const zone = zones.find((z) => z.id === activeZone);
+    if (!zone || !mapRef.current) return;
+    const layerId = `zone-${activeZone}`;
+    const sourceId = `src-${activeZone}`;
+    if (mapRef.current.getLayer(layerId)) mapRef.current.removeLayer(layerId);
+    if (mapRef.current.getSource(sourceId)) mapRef.current.removeSource(sourceId);
+    mapRef.current.addSource(sourceId, { type: "geojson", data: geojson });
+    mapRef.current.addLayer({ id: layerId, type: "fill", source: sourceId, paint: { "fill-color": zone.color, "fill-opacity": 0.25 } });
+    mapRef.current.addLayer({ id: `${layerId}-border`, type: "line", source: sourceId, paint: { "line-color": zone.color, "line-width": 2 } });
+    saveTerritory(activeZone, geojson);
+    coordsRef.current = [];
+    setDrawing(false);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={sectionTitle}>Territory Map</h2>
+        <div style={{ display: "flex", gap: 10 }}>
+          {drawing ? (
+            <>
+              <button style={btnPrimary} onClick={finishDrawing}>Finish Drawing</button>
+              <button style={btnGhost} onClick={() => { setDrawing(false); coordsRef.current = []; }}>Cancel</button>
+            </>
+          ) : (
+            <button
+              style={{ ...btnPrimary, opacity: activeZone ? 1 : 0.5 }}
+              onClick={() => activeZone && setDrawing(true)}
+              disabled={!activeZone}
+            >
+              Draw Territory
+            </button>
+          )}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        {zones.map((z) => (
+          <button
+            key={z.id}
+            onClick={() => setActiveZone(z.id === activeZone ? "" : z.id)}
+            style={{ ...btnGhost, fontSize: 12, background: activeZone === z.id ? z.color + "33" : "transparent", color: activeZone === z.id ? z.color : "#8AACCA", borderColor: activeZone === z.id ? z.color + "88" : "#1E3A5F" }}
+          >
+            {z.name}
+          </button>
+        ))}
+      </div>
+      {drawing && (
+        <div style={{ background: "#C9A84C22", border: "1px solid #C9A84C55", borderRadius: 8, padding: "10px 16px", marginBottom: 12, color: "#C9A84C", fontSize: 13 }}>
+          📍 Click on the map to place territory boundary points. Click "Finish Drawing" when done (min 3 points).
+        </div>
+      )}
+      <div ref={mapContainer} style={{ width: "100%", height: 480, borderRadius: 12, border: "1px solid #1E3A5F", overflow: "hidden" }} />
+      <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
+        {Object.entries(STATUS_META).map(([, v]) => (
+          <div key={v.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div style={{ width: 10, height: 10, borderRadius: "50%", background: v.color }} />
+            <span style={{ color: "#8AACCA", fontSize: 11 }}>{v.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Shared styles ────────────────────────────────────────────────────────────
+const sectionTitle: React.CSSProperties = {
+  margin: 0, color: "#C9A84C", fontFamily: "Georgia, serif",
+  fontSize: 20, fontWeight: 700, letterSpacing: 0.5,
+};
+
+const card: React.CSSProperties = {
+  background: "#0A1628",
+  border: "1px solid #1E3A5F",
+  borderRadius: 10,
+  padding: "14px 18px",
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 12,
+};
+
+function Empty({ text }: { text: string }) {
+  return (
+    <div style={{ color: "#8AACCA", textAlign: "center", padding: "40px 20px", border: "1px dashed #1E3A5F", borderRadius: 10, fontSize: 14 }}>
+      {text}
+    </div>
+  );
+}
+
+// ─── Stats bar ────────────────────────────────────────────────────────────────
+function StatsBar({ zones, doors, reps, routes, pickups }: { zones: Zone[]; doors: Door[]; reps: Rep[]; routes: Route[]; pickups: BulkPickup[] }) {
+  const sold = doors.filter((d) => d.status === "sold").length;
+  const interested = doors.filter((d) => d.status === "interested").length;
+  const stats = [
+    { label: "Zones", value: zones.length },
+    { label: "Doors", value: doors.length },
+    { label: "Interested", value: interested },
+    { label: "Sold", value: sold },
+    { label: "Routes", value: routes.length },
+    { label: "Reps", value: reps.length },
+    { label: "Pickups", value: pickups.length },
+  ];
+  return (
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 28 }}>
+      {stats.map((s) => (
+        <div key={s.label} style={{ background: "#0A1628", border: "1px solid #1E3A5F", borderRadius: 10, padding: "10px 18px", textAlign: "center", minWidth: 72 }}>
+          <div style={{ color: "#C9A84C", fontSize: 22, fontWeight: 800, fontFamily: "Georgia, serif", lineHeight: 1 }}>{s.value}</div>
+          <div style={{ color: "#8AACCA", fontSize: 11, marginTop: 3, letterSpacing: 0.5, textTransform: "uppercase" }}>{s.label}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [tab, setTab] = useState<Tab>("zones");
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [doors, setDoors] = useState<Door[]>([]);
+  const [routes, setRoutes] = useState<Route[]>([]);
+  const [reps, setReps] = useState<Rep[]>([]);
+  const [pickups, setPickups] = useState<BulkPickup[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const [z, d, r, rp, bp] = await Promise.all([
+        supabase.from("zones").select("*"),
+        supabase.from("doors").select("*"),
+        supabase.from("routes").select("*"),
+        supabase.from("reps").select("*"),
+        supabase.from("bulk_pickups").select("*"),
+      ]);
+      if (z.data) setZones(z.data);
+      if (d.data) setDoors(d.data);
+      if (r.data) setRoutes(r.data);
+      if (rp.data) setReps(rp.data);
+      if (bp.data) setPickups(bp.data);
+      setLoading(false);
+    })();
+  }, []);
+
+  const tabs: { id: Tab; label: string; icon: string }[] = [
+    { id: "zones",    label: "Zones",    icon: "⬡" },
+    { id: "doors",    label: "Doors",    icon: "🚪" },
+    { id: "routes",   label: "Routes",   icon: "🗺" },
+    { id: "reps",     label: "Reps",     icon: "👤" },
+    { id: "calendar", label: "Calendar", icon: "📅" },
+    { id: "map",      label: "Map",      icon: "📍" },
+  ];
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#050D1A", fontFamily: "'Segoe UI', system-ui, sans-serif", color: "#E8D5A0" }}>
+      {/* Header */}
+      <header style={{
+        background: "linear-gradient(180deg,#071523 0%,#050D1A 100%)",
+        borderBottom: "1px solid #1E3A5F",
+        padding: "0 24px",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        height: 60,
+        position: "sticky", top: 0, zIndex: 100,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 32, height: 32, background: "linear-gradient(135deg,#C9A84C,#A07C30)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>♜</div>
+          <div>
+            <div style={{ color: "#C9A84C", fontFamily: "Georgia, serif", fontWeight: 700, fontSize: 16, letterSpacing: 1, lineHeight: 1 }}>MAESTRO</div>
+            <div style={{ color: "#4C6A8A", fontSize: 10, letterSpacing: 2, textTransform: "uppercase" }}>DTD Tracker</div>
+          </div>
+        </div>
+        <nav style={{ display: "flex", gap: 4 }}>
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              style={{
+                background: tab === t.id ? "#C9A84C22" : "transparent",
+                color: tab === t.id ? "#C9A84C" : "#8AACCA",
+                border: tab === t.id ? "1px solid #C9A84C44" : "1px solid transparent",
+                borderRadius: 8,
+                padding: "6px 14px",
+                cursor: "pointer",
+                fontSize: 13,
+                fontWeight: tab === t.id ? 700 : 400,
+                letterSpacing: 0.3,
+                transition: "all 0.15s",
+              }}
+            >
+              <span style={{ marginRight: 6 }}>{t.icon}</span>{t.label}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      {/* Main */}
+      <main style={{ maxWidth: 960, margin: "0 auto", padding: "28px 20px" }}>
+        {loading ? (
+          <div style={{ textAlign: "center", color: "#8AACCA", padding: 80 }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>♜</div>
+            Loading Maestro…
+          </div>
+        ) : (
+          <>
+            <StatsBar zones={zones} doors={doors} reps={reps} routes={routes} pickups={pickups} />
+            {tab === "zones"    && <ZonesTab zones={zones} setZones={setZones} />}
+            {tab === "doors"    && <DoorsTab zones={zones} doors={doors} setDoors={setDoors} />}
+            {tab === "routes"   && <RoutesTab zones={zones} doors={doors} routes={routes} setRoutes={setRoutes} />}
+            {tab === "reps"     && <RepsTab zones={zones} reps={reps} setReps={setReps} />}
+            {tab === "calendar" && <CalendarTab zones={zones} pickups={pickups} setPickups={setPickups} />}
+            {tab === "map"      && <MapTab zones={zones} doors={doors} setZones={setZones} />}
+          </>
+        )}
+      </main>
+    </div>
+  );
 }
